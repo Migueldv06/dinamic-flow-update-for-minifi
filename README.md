@@ -14,11 +14,11 @@ dinamic-flow-update-for-minifi/
 │   ├── docker-compose.yaml
 │   ├── Dockerfile
 │   └── conf/               # gerado nos passos abaixo
-│       └── nifi-teste/     # clone do repositório GitHub (espelho)
+│       └── nifi-teste/     # clone do repositório GitHub criado abaixo
 └── minifi/
     └── minifi-2.11.0/
         └── conf/
-            └── nifi-teste/ # clone do repositório GitHub
+            └── nifi-teste/ # clone do repositório GitHub criado abaixo
 ```
 
 ## Índice
@@ -87,11 +87,9 @@ networks:
     driver: bridge
 ```
 
-> ⚠️ Evite manter usuário/senha em texto puro se for versionar este arquivo publicamente. Prefira um `.env` (fora do Git) e referencie com `${SINGLE_USER_CREDENTIALS_PASSWORD}`.
-
 ### 1.3 `nifi/Dockerfile`
 
-Estende a imagem oficial para incluir o `git`, necessário para o processor `ExecuteProcess` que fará o `git pull` mais adiante.
+Foi criado um Dockerfile para podermos incluir o `git`, que é necessário para o servidor conseguir executar o `ExecuteProcess` que fara o `git pull` mais a frente sem erros.
 
 ```dockerfile
 FROM apache/nifi:2.11.0
@@ -158,10 +156,7 @@ https://localhost:8443/nifi/
 - **login:** `admin`
 - **senha:** `sejalivrenifi2026` *(defina a sua no `docker-compose.yaml`)*
 
-<!--
-📸 Sugestão de imagem: print da tela de login do NiFi.
 ![Tela de login do NiFi](./docs/images/nifi-login.png)
--->
 
 ---
 
@@ -175,6 +170,9 @@ https://localhost:8443/nifi/
 
 > 🔒 Guarde o token com cuidado — ele será usado para autenticar o `git clone`/`git pull` tanto no NiFi quanto no MiNiFi, e também no Registry Client do NiFi.
 
+> 🔒 Você pode utilizar estes tokens para limitar o acesso dos agentes, utilizando tokens individuais e excluindo caso deseje desabilitar um agente minifi
+
+
 ---
 
 ## 3. Conectando o NiFi ao GitHub
@@ -185,15 +183,13 @@ No menu superior direito (ícone de 3 barras): **Controller Settings → Registr
 
 | Campo | Valor (exemplo) |
 |---|---|
-| Repository Owner | `Migueld06` |
+| Repository Owner | `Migueldv06` |
 | Repository Name | `nifi-teste` |
 | Authentication Type | Personal Access Token |
 | Personal Access Token | `********` |
 
-<!--
-📸 Sugestão de imagem: print da tela de configuração do GitHubFlowRegistryClient.
 ![Configuração do Registry Client](./docs/images/github-flow-registry.png)
--->
+
 
 ### 3.2 Colocar o process group sob controle de versão
 
@@ -293,7 +289,7 @@ Depois, no NiFi, edite o flow e clique em **Save** (commit da versão). Verifiqu
 O flow de teste usa um processor `ExecuteProcess` que roda `git pull` dentro de `./conf/nifi-teste`. Essa pasta precisa existir e conter o clone do repositório para o processor não falhar:
 
 ```bash
-cd ~/Downloads/dinamic-flow-update-for-minifi/nifi/conf/
+cd dinamic-flow-update-for-minifi/nifi/conf/
 sudo git clone https://Migueldv06:<TOKEN>@github.com/Migueldv06/nifi-teste.git nifi-teste
 sudo chown -R 1000:1000 nifi-teste
 ```
@@ -324,14 +320,15 @@ Crie outro fluxo com um processor **`ExecuteProcess`**:
 | Working Directory | `./conf/nifi-teste` |
 | Scheduler | `1 min` (ajuste conforme desejado) |
 
+![Fluxo de atualização dinâmica](./docs/images/executeprocess.png)
+
 Ligue a saída dele a um `LogAttribute` e descarte o flow file em seguida (ele serve só como "gatilho" do `git pull`, não carrega dado útil).
 
 > Se a pasta `./conf/nifi-teste` ainda não existir, o `ExecuteProcess` vai gerar alerta de erro — veja a [seção 5](#5-espelhando-o-repositório-dentro-do-servidor-nifi).
 
-<!--
-📸 Sugestão de imagem: print do canvas mostrando ExecuteProcess -> LogAttribute -> auto terminate.
-![Fluxo de atualização dinâmica](./docs/images/executeprocess-flow.png)
--->
+
+![Fluxo de atualização dinâmica](./docs/images/flow-canvas.png)
+
 
 ---
 
@@ -394,12 +391,3 @@ Acompanhe os logs — é neles que você vai ver o `GenerateFlowFile` sendo exec
 4. No servidor, o `ExecuteProcess` (rodando a cada 1 min) puxa a atualização via `git pull` em `conf/nifi-teste`.
 5. No agente MiNiFi, o `FileChangeIngestor` detecta a mudança no `flow-minifi.json` e recarrega o flow automaticamente.
 6. Verifique nos logs do MiNiFi (`./bin/minifi.sh run`) se a nova mensagem aparece.
-
----
-
-## Segurança / boas práticas
-
-- **Nunca deixe o token do GitHub em texto puro** em comandos versionados ou em histórico de shell (`git clone https://user:<TOKEN>@github.com/...`). Prefira SSH com chave, ou um *credential helper* do Git, ou variáveis de ambiente/secrets.
-- O `SINGLE_USER_CREDENTIALS_PASSWORD` do NiFi também não deveria ficar em texto puro no `docker-compose.yaml` versionado — use um `.env` fora do Git.
-- Prefira repositórios **privados** para os flows, já que eles podem conter informações sensíveis de infraestrutura.
-- Revise periodicamente as permissões do Personal Access Token e prefira tokens com escopo mínimo necessário (fine-grained tokens, quando possível).
