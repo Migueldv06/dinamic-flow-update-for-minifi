@@ -1,29 +1,50 @@
-# Ambiente NiFi + MiNiFi
+# Dynamic Flow Update for MiNiFi
 
-Este repositório contém a configuração de um ambiente Apache NiFi (via Docker) integrado a agentes MiNiFi, com sincronização automática de flows através do GitHub Actions.
+Ambiente que demonstra como manter agentes **MiNiFi** atualizados automaticamente a partir de um flow versionado no **GitHub**, sem precisar reimplantar cada agente manualmente.
+
+## Visão geral do pipeline
+
+1. Você desenha o flow no **NiFi** (servidor) e o coloca sob controle de versão apontando pra um repositório do GitHub.
+2. Um **GitHub Actions workflow** converte o flow (`NiFi-Flow.json`) para o formato lido pelo MiNiFi (`flow-minifi.json`) usando o **MiNiFi Toolkit**.
+3. Cada agente **MiNiFi** roda um `git pull` periódico (via um processor `ExecuteProcess` no próprio flow) e recarrega o `flow-minifi.json` sempre que ele muda.
+
+```
+dinamic-flow-update-for-minifi/
+├── nifi/
+│   ├── docker-compose.yaml
+│   ├── Dockerfile
+│   └── conf/               # gerado nos passos abaixo
+│       └── nifi-teste/     # clone do repositório GitHub (espelho)
+└── minifi/
+    └── minifi-2.11.0/
+        └── conf/
+            └── nifi-teste/ # clone do repositório GitHub
+```
 
 ## Índice
 
-- [NiFi](#nifi)
-  - [docker-compose.yaml](#docker-composeyaml)
-  - [Criando as pastas necessárias](#1-criando-as-pastas-necessárias)
-  - [Ajustando permissões](#2-ajustando-permissões)
-- [MiNiFi](#minifi)
-  - [bootstrap.conf](#confbootstrapconf)
-- [GitHub Actions](#github-actions)
-  - [Workflow de conversão do flow](#workflow-de-conversão-do-flow)
-- [Configurações extras](#configurações-extras)
-  - [Conectar o NiFi ao GitHub](#conectar-o-nifi-ao-github)
-  - [Flow com atualização dinâmica](#configurando-flow-para-atualização-dinâmica)
-- [Execução](#execução)
+- [1. NiFi (servidor)](#1-nifi-servidor)
+- [2. GitHub — repositório e token](#2-github--repositório-e-token)
+- [3. Conectando o NiFi ao GitHub](#3-conectando-o-nifi-ao-github)
+- [4. Pipeline de conversão do flow (GitHub Actions)](#4-pipeline-de-conversão-do-flow-github-actions)
+- [5. Espelhando o repositório dentro do servidor NiFi](#5-espelhando-o-repositório-dentro-do-servidor-nifi)
+- [6. Criando os fluxos de teste no NiFi](#6-criando-os-fluxos-de-teste-no-nifi)
+- [7. MiNiFi (agente)](#7-minifi-agente)
+- [8. Testando o fluxo completo](#8-testando-o-fluxo-completo)
+- [Segurança / boas práticas](#segurança--boas-práticas)
 
 ---
 
-## NiFi
+## 1. NiFi (servidor)
 
-### docker-compose.yaml
+### 1.1 Criar as pastas do projeto
 
-Arquivo de orquestração do container do NiFi, expondo a porta HTTPS e persistindo os repositórios em disco.
+```bash
+mkdir nifi
+mkdir minifi
+```
+
+### 1.2 `nifi/docker-compose.yaml`
 
 ```yaml
 services:
@@ -66,59 +87,144 @@ networks:
     driver: bridge
 ```
 
-> ⚠️ **Segurança:** evite manter usuário e senha em texto puro no `docker-compose.yaml` versionado. Prefira um arquivo `.env` (adicionado ao `.gitignore`) e referencie as variáveis com `${SINGLE_USER_CREDENTIALS_PASSWORD}`.
+> ⚠️ Evite manter usuário/senha em texto puro se for versionar este arquivo publicamente. Prefira um `.env` (fora do Git) e referencie com `${SINGLE_USER_CREDENTIALS_PASSWORD}`.
 
-### 1. Criando as pastas necessárias
+### 1.3 `nifi/Dockerfile`
 
-O NiFi precisa que essas pastas já existam no host antes de subir o container, pois elas são montadas como volumes.
+Estende a imagem oficial para incluir o `git`, necessário para o processor `ExecuteProcess` que fará o `git pull` mais adiante.
 
-```bash
-mkdir conf logs state database_repository flowfile_repository content_repository provenance_repository
+```dockerfile
+FROM apache/nifi:2.11.0
+USER root
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+USER nifi
 ```
 
-### 2. Ajustando permissões
+### 1.4 Criar pastas de dados e ajustar permissões
 
-O processo do NiFi dentro do container roda com o UID `1000`. Sem isso, o container pode falhar ao escrever nos repositórios.
+Essas pastas são os volumes montados no `docker-compose.yaml`. Precisam existir no host e pertencer ao UID `1000` (usuário `nifi` dentro do container).
 
 ```bash
+cd nifi
+mkdir conf logs state database_repository flowfile_repository content_repository provenance_repository
 sudo chown -R 1000:1000 conf logs state database_repository flowfile_repository content_repository provenance_repository
 ```
 
+### 1.5 Primeira execução — populando a pasta `conf`
+
+Como a pasta `./conf` está vazia, o bind mount `./conf:/opt/nifi/nifi-current/conf` **substitui** a pasta `conf` que já vem dentro da imagem (com o `nifi.properties` padrão). Sem esses arquivos, o NiFi falha logo na subida com um erro parecido com:
+
+```
+nifi  | File [/opt/nifi/nifi-current/conf/nifi.properties] uncommenting [nifi.python.command]
+nifi  | sed: can't read /opt/nifi/nifi-current/conf/nifi.properties: No such file or directory
+nifi exited with code 2 (restarting)
+```
+
+Por isso, na primeira subida, o `conf` precisa ser populado manualmente com os arquivos padrão da imagem:
+
+1. **Comente** a linha do volume `conf` no `docker-compose.yaml`:
+   ```yaml
+   volumes:
+     # - ./conf:/opt/nifi/nifi-current/conf   # comentado só na primeira subida
+     - ./logs:/opt/nifi/nifi-current/logs
+     # ...demais volumes
+   ```
+
+2. **Suba o container** para o NiFi gerar os arquivos padrão internamente:
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Copie os arquivos gerados** para o host:
+   ```bash
+   sudo docker cp nifi:/opt/nifi/nifi-current/conf/. ./conf/
+   sudo chown -R 1000:1000 ./conf
+   ```
+
+4. **Descomente** a linha do volume `conf` e suba novamente:
+   ```bash
+   docker compose down
+   docker compose up -d
+   ```
+
+> 💡 Se o mesmo erro aparecer para `state`, `database_repository` etc., repita esse processo para a pasta em questão.
+
+### 1.6 Acessar o NiFi
+
+```
+https://localhost:8443/nifi/
+```
+
+- **login:** `admin`
+- **senha:** `sejalivrenifi2026` *(defina a sua no `docker-compose.yaml`)*
+
 <!--
-📸 Sugestão de imagem: print da tela de login do NiFi (https://localhost:8443/nifi)
-para mostrar o resultado após o `docker-compose up -d`.
+📸 Sugestão de imagem: print da tela de login do NiFi.
 ![Tela de login do NiFi](./docs/images/nifi-login.png)
 -->
 
 ---
 
-## MiNiFi
+## 2. GitHub — repositório e token
 
-### `conf/bootstrap.conf`
+1. Crie um repositório no GitHub (pode ser **privado** por segurança) — ex.: `nifi-teste`.
+2. Adicione um `README.md` inicial.
+3. Gere um **Personal Access Token (classic)**:
+   `Settings > Developer settings > Personal access tokens > Generate new token (classic)`
+   Conceda permissão de **repo** (acesso a repositórios).
 
-Edite os parâmetros existentes ou adicione as linhas abaixo ao final do arquivo. Elas configuram o MiNiFi para monitorar um arquivo de flow local e recarregá-lo automaticamente quando ele mudar.
-
-```properties
-nifi.minifi.notifier.ingestors=org.apache.nifi.minifi.bootstrap.configuration.ingestors.FileChangeIngestor
-nifi.minifi.notifier.ingestors.file.config.path=./conf/nifi-repositorio-teste/default/flow-minifi.json
-nifi.minifi.notifier.ingestors.file.polling.period.seconds=1
-```
-
-| Parâmetro | Descrição |
-|---|---|
-| `nifi.minifi.notifier.ingestors` | Define a classe responsável por detectar mudanças no arquivo de flow. |
-| `...ingestors.file.config.path` | Caminho do arquivo de flow que o MiNiFi deve observar. |
-| `...file.polling.period.seconds` | Intervalo (em segundos) entre cada verificação de mudança no arquivo. |
+> 🔒 Guarde o token com cuidado — ele será usado para autenticar o `git clone`/`git pull` tanto no NiFi quanto no MiNiFi, e também no Registry Client do NiFi.
 
 ---
 
-## GitHub Actions
+## 3. Conectando o NiFi ao GitHub
 
-### Workflow de conversão do flow
+### 3.1 Criar o Registry Client
 
-Baixe o **MiNiFi Toolkit 2.11** ([release oficial](https://nifi.apache.org/download/)), responsável por converter o flow exportado do NiFi (`NiFi-Flow.json`) para o formato lido pelo MiNiFi (`flow-minifi.json`).
+No menu superior direito (ícone de 3 barras): **Controller Settings → Registry Clients** → adicione um **`GitHubFlowRegistryClient`** com:
 
-Crie o arquivo `.github/workflows/gerar-flow-minifi.yaml`:
+| Campo | Valor (exemplo) |
+|---|---|
+| Repository Owner | `Migueld06` |
+| Repository Name | `nifi-teste` |
+| Authentication Type | Personal Access Token |
+| Personal Access Token | `********` |
+
+<!--
+📸 Sugestão de imagem: print da tela de configuração do GitHubFlowRegistryClient.
+![Configuração do Registry Client](./docs/images/github-flow-registry.png)
+-->
+
+### 3.2 Colocar o process group sob controle de versão
+
+No seu process group, clique com o botão direito → **Version → Start version control**:
+
+- Selecione o `GitHubFlowRegistryClient` criado acima.
+- Informe um **Flow Name** (ex.: `NiFi-Flow`).
+- Clique em **Save**.
+
+A partir daqui, toda alteração no flow pode ser commitada diretamente para o repositório pelo próprio NiFi.
+
+---
+
+## 4. Pipeline de conversão do flow (GitHub Actions)
+
+### 4.1 Clonar o repositório e baixar o MiNiFi Toolkit
+
+```bash
+git clone git@github.com:Migueldv06/nifi-teste.git
+cd nifi-teste
+
+wget https://dlcdn.apache.org/nifi/2.11.0/minifi-toolkit-2.11.0-bin.zip
+unzip minifi-toolkit-2.11.0-bin.zip
+rm minifi-toolkit-2.11.0-bin.zip
+```
+
+O **MiNiFi Toolkit** é quem converte o flow exportado do NiFi (formato `NiFi-Flow.json`) para o formato lido pelos agentes MiNiFi (`flow-minifi.json`).
+
+### 4.2 Criar o workflow
+
+No GitHub, aba **Actions → simple workflow → Configure**, crie o arquivo `.github/workflows/gerar-flow-minifi.yml`:
 
 ```yaml
 name: Gerar Flow MiNiFi
@@ -163,70 +269,137 @@ jobs:
           file_pattern: 'default/flow-minifi.json'
 ```
 
-**O que esse workflow faz:**
-1. É disparado a cada `push` na branch `main` que altere arquivos `.json`, `.xml` ou o próprio toolkit.
-2. Faz checkout do repositório e instala o Java 21 (necessário para rodar o toolkit).
-3. Executa o `config.sh transform-nifi`, convertendo o flow exportado do NiFi para o formato do MiNiFi.
-4. Commita e envia automaticamente o `flow-minifi.json` atualizado de volta ao repositório.
+**O que ele faz:** a cada `push` na `main` que altere `.json`, `.xml` ou o próprio toolkit, ele instala o Java 21, roda `config.sh transform-nifi` para converter o flow, e commita o `flow-minifi.json` resultante de volta no repositório.
+
+> ⚠️ Confira se os nomes de arquivos/pastas usados no workflow (`./default/NiFi-Flow.json`) batem com os nomes reais gerados pelo NiFi no seu repositório.
+
+### 4.3 Subir as alterações e validar
+
+```bash
+git pull && git add . && git commit -m "adicionando minifi toolkit" && git push
+```
+
+Depois, no NiFi, edite o flow e clique em **Save** (commit da versão). Verifique se o arquivo `default/flow-minifi.json` foi gerado/atualizado no repositório pela Action.
 
 <!--
-📸 Sugestão de imagem: print da aba "Actions" do GitHub mostrando o workflow rodando com sucesso.
+📸 Sugestão de imagem: print da aba Actions do GitHub mostrando o workflow rodando com sucesso.
 ![Workflow rodando no GitHub Actions](./docs/images/github-actions-run.png)
 -->
 
 ---
 
-## Configurações extras
+## 5. Espelhando o repositório dentro do servidor NiFi
 
-### Conectar o NiFi ao GitHub
+O flow de teste usa um processor `ExecuteProcess` que roda `git pull` dentro de `./conf/nifi-teste`. Essa pasta precisa existir e conter o clone do repositório para o processor não falhar:
 
-1. Em **Controller Services**, adicione o serviço `GitHubFlowRegistryClient`.
-2. Configure com:
-   - **Token** de acesso pessoal do GitHub;
-   - **URL** do repositório;
-   - **Branch** desejada.
-3. Isso permite versionar os flows do NiFi diretamente no GitHub, funcionando como um "Flow Registry".
+```bash
+cd ~/Downloads/dinamic-flow-update-for-minifi/nifi/conf/
+sudo git clone https://Migueldv06:<TOKEN>@github.com/Migueldv06/nifi-teste.git nifi-teste
+sudo chown -R 1000:1000 nifi-teste
+```
 
-Para os agentes MiNiFi, o equivalente é fazer um `git pull` do projeto (usando o token) dentro da pasta `conf/` do NiFi e de cada agente MiNiFi.
+> Essa pasta **não interfere** no funcionamento do servidor NiFi em si — ela existe apenas para o NiFi ter o "mesmo ambiente" (a mesma estrutura de repositório) que os agentes MiNiFi terão, permitindo testar o `ExecuteProcess` localmente antes de replicar nos agentes.
 
-<!--
-📸 Sugestão de imagem: print da tela de configuração do "GitHubFlowRegistryClient" em Controller Services.
-![Configuração do GitHubFlowRegistryClient](./docs/images/github-flow-registry.png)
--->
+---
 
-### Configurando flow para atualização dinâmica
+## 6. Criando os fluxos de teste no NiFi
 
-Utilize um processor **ExecuteProcess** configurado assim:
+### 6.1 Fluxo de teste simples
+
+Crie um **process group** de teste com:
+
+- `GenerateFlowFile` (com um atributo/conteúdo de teste)
+- ligado a um `LogAttribute`
+
+Serve só para gerar dados e confirmar que o flow versionado está sendo aplicado corretamente.
+
+### 6.2 Fluxo de atualização dinâmica (`git pull` periódico)
+
+Crie outro fluxo com um processor **`ExecuteProcess`**:
 
 | Propriedade | Valor |
 |---|---|
 | Command | `git` |
 | Command Arguments | `pull origin main -q` |
-| Working Directory | `./conf/nifi-repositorio-teste` |
+| Working Directory | `./conf/nifi-teste` |
+| Scheduler | `1 min` (ajuste conforme desejado) |
 
-Configure o **Scheduler** conforme a periodicidade desejada (ex.: a cada 30s ou 1 min).
+Ligue a saída dele a um `LogAttribute` e descarte o flow file em seguida (ele serve só como "gatilho" do `git pull`, não carrega dado útil).
 
-Conecte a saída desse processor a um **LogAttribute** e descarte o flow file em seguida (ele serve apenas como "gatilho", não carrega dados úteis).
+> Se a pasta `./conf/nifi-teste` ainda não existir, o `ExecuteProcess` vai gerar alerta de erro — veja a [seção 5](#5-espelhando-o-repositório-dentro-do-servidor-nifi).
 
 <!--
-📸 Sugestão de imagem: print do canvas do NiFi mostrando ExecuteProcess -> LogAttribute -> (auto terminar).
+📸 Sugestão de imagem: print do canvas mostrando ExecuteProcess -> LogAttribute -> auto terminate.
 ![Fluxo de atualização dinâmica](./docs/images/executeprocess-flow.png)
 -->
 
 ---
 
-## Execução
+## 7. MiNiFi (agente)
 
-Subir o NiFi:
-
-```bash
-docker-compose up -d
-```
-
-Executar o MiNiFi:
+### 7.1 Download
 
 ```bash
-./bin/minifi.sh run
+cd ~/Downloads/dinamic-flow-update-for-minifi/minifi
+wget https://dlcdn.apache.org/nifi/2.11.0/minifi-2.11.0-bin.zip
+unzip minifi-2.11.0-bin.zip
+rm minifi-2.11.0-bin.zip
 ```
 
-Após subir, acesse a interface web do NiFi em `https://localhost:8443/nifi` com o usuário e senha definidos no `docker-compose.yaml`.
+### 7.2 `conf/bootstrap.conf`
+
+Edite (ou adicione ao final) `minifi-2.11.0/conf/bootstrap.conf`:
+
+```bash
+nano minifi-2.11.0/conf/bootstrap.conf
+```
+
+```properties
+nifi.minifi.notifier.ingestors=org.apache.nifi.minifi.bootstrap.configuration.ingestors.FileChangeIngestor
+nifi.minifi.notifier.ingestors.file.config.path=./conf/nifi-teste/default/flow-minifi.json
+nifi.minifi.notifier.ingestors.file.polling.period.seconds=1
+```
+
+| Parâmetro | Descrição |
+|---|---|
+| `nifi.minifi.notifier.ingestors` | Classe responsável por detectar mudanças no arquivo de flow. |
+| `...ingestors.file.config.path` | Caminho do `flow-minifi.json` que o MiNiFi deve observar e recarregar quando mudar. |
+| `...file.polling.period.seconds` | Intervalo (segundos) entre cada verificação de mudança no arquivo. |
+
+### 7.3 Clonar o repositório dentro do agente
+
+O caminho configurado acima (`./conf/nifi-teste/...`) precisa existir de fato:
+
+```bash
+cd ~/Downloads/dinamic-flow-update-for-minifi/minifi/minifi-2.11.0/conf/
+git clone https://Migueldv06:<TOKEN>@github.com/Migueldv06/nifi-teste.git nifi-teste
+```
+
+### 7.4 Executar
+
+```bash
+cd ~/Downloads/dinamic-flow-update-for-minifi/minifi/minifi-2.11.0/bin/
+./minifi.sh run
+```
+
+Acompanhe os logs — é neles que você vai ver o `GenerateFlowFile` sendo executado a cada ciclo.
+
+---
+
+## 8. Testando o fluxo completo
+
+1. No NiFi, edite a mensagem do `GenerateFlowFile` (ex.: `"ola miguel"` → `"ola miguel v2"`).
+2. Faça o commit da versão do flow (**Version → Commit local changes**).
+3. Aguarde a Action rodar e atualizar o `default/flow-minifi.json` no repositório.
+4. No servidor, o `ExecuteProcess` (rodando a cada 1 min) puxa a atualização via `git pull` em `conf/nifi-teste`.
+5. No agente MiNiFi, o `FileChangeIngestor` detecta a mudança no `flow-minifi.json` e recarrega o flow automaticamente.
+6. Verifique nos logs do MiNiFi (`./bin/minifi.sh run`) se a nova mensagem aparece.
+
+---
+
+## Segurança / boas práticas
+
+- **Nunca deixe o token do GitHub em texto puro** em comandos versionados ou em histórico de shell (`git clone https://user:<TOKEN>@github.com/...`). Prefira SSH com chave, ou um *credential helper* do Git, ou variáveis de ambiente/secrets.
+- O `SINGLE_USER_CREDENTIALS_PASSWORD` do NiFi também não deveria ficar em texto puro no `docker-compose.yaml` versionado — use um `.env` fora do Git.
+- Prefira repositórios **privados** para os flows, já que eles podem conter informações sensíveis de infraestrutura.
+- Revise periodicamente as permissões do Personal Access Token e prefira tokens com escopo mínimo necessário (fine-grained tokens, quando possível).

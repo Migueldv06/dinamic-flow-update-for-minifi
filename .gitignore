@@ -1,0 +1,51 @@
+# =========================================
+# NiFi — dados de runtime (gerados localmente, não versionar)
+# =========================================
+nifi/conf/
+nifi/logs/
+nifi/state/
+nifi/database_repository/
+nifi/flowfile_repository/
+nifi/content_repository/
+nifi/provenance_repository/
+
+# =========================================
+# MiNiFi — binários baixados (não são código-fonte do projeto)
+# =========================================
+minifi/minifi-2.11.0/
+minifi-toolkit-2.11.0/
+minifi-toolkit-2.11.0-bin.zip
+minifi-2.11.0-bin.zip
+*.zip
+
+# =========================================
+# Repositórios espelhados (clones aninhados usados pelo ExecuteProcess)
+# Ex: nifi/conf/nifi-teste, minifi/minifi-2.11.0/conf/nifi-teste
+# =========================================
+**/nifi-teste/
+
+# =========================================
+# Segredos / credenciais
+# =========================================
+.env
+.env.*
+*.token
+*credentials*
+*secrets*
+
+# =========================================
+# Logs
+# =========================================
+*.log
+logs/
+
+# =========================================
+# Lixo de SO / editor
+# =========================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
