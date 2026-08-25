@@ -31,7 +31,6 @@ dinamic-flow-update-for-minifi/
 - [6. Criando os fluxos de teste no NiFi](#6-criando-os-fluxos-de-teste-no-nifi)
 - [7. MiNiFi (agente)](#7-minifi-agente)
 - [8. Testando o fluxo completo](#8-testando-o-fluxo-completo)
-- [Segurança / boas práticas](#segurança--boas-práticas)
 
 ---
 
