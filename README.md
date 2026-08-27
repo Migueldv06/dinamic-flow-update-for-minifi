@@ -31,6 +31,7 @@ dinamic-flow-update-for-minifi/
 - [6. Criando os fluxos de teste no NiFi](#6-criando-os-fluxos-de-teste-no-nifi)
 - [7. MiNiFi (agente)](#7-minifi-agente)
 - [8. Testando o fluxo completo](#8-testando-o-fluxo-completo)
+- [9. Arquitetura](#9-arquitetura)
 
 ---
 
@@ -390,3 +391,9 @@ Acompanhe os logs — é neles que você vai ver o `GenerateFlowFile` sendo exec
 4. No servidor, o `ExecuteProcess` (rodando a cada 1 min) puxa a atualização via `git pull` em `conf/nifi-teste`.
 5. No agente MiNiFi, o `FileChangeIngestor` detecta a mudança no `flow-minifi.json` e recarrega o flow automaticamente.
 6. Verifique nos logs do MiNiFi (`./bin/minifi.sh run`) se a nova mensagem aparece.
+
+## 9. Arquitetura
+
+Imagem ilustrando a arquitetura do sistema:
+
+![Arquitetura do sistema](./docs/images/arquitetura.jpg)
