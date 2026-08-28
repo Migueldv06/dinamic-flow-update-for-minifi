@@ -1,3 +1,8 @@
+<div align="right">
+  <a href="README.md">🇧🇷 Português</a> | 
+  <a href="README-en.md">🇺🇸 English</a>
+</div>
+
 # Dynamic Flow Update for MiNiFi
 
 An environment demonstrating how to keep **MiNiFi** agents automatically updated from a version-controlled flow on **GitHub**, without needing to manually redeploy each agent.
